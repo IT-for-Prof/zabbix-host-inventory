@@ -1,0 +1,11 @@
+# Deny by default, allow by exception (same scheme as zabbix-windows-exhaustion).
+/*
+!/.gitignore
+!/LICENSE
+!/README.md
+!/template/
+/template/*
+!/template/*.yaml
+!/tests/
+/tests/*
+!/tests/check.py

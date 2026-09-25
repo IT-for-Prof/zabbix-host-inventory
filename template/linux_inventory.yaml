@@ -1,0 +1,745 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: 1d9c5416b33343fa94a09c66b4ed9e22
+      name: 'Templates/Operating systems'
+  templates:
+    - uuid: 50cb44a341374aa8a9102f410296f143
+      template: 'Linux inventory by Zabbix agent active'
+      name: 'Linux inventory by Zabbix agent active'
+      description: |
+        Инвентарь Linux только встроенными ключами Zabbix agent 7.0+ (без UserParameter):
+        - пакеты dpkg/rpm через system.sw.packages.get: читаемый список → inventory software_full, сводка → software, архитектура → hw_arch, версии отдельных пакетов и LLD по {$SWINV.APPS}. ПО в контейнерах в манифест не попадает;
+        - PRETTY_NAME дистрибутива → os_full;
+        - IPv4-адреса из /proc/net/fib_trie (JSON swinv.net.ip4, текст → host_networks) и MAC через system.hw.macaddr (JSON swinv.net.mac, текст → macaddress_a).
+        - для сверки с IPAM: swinv.net.ifaces — интерфейсы с адресами/префиксом и MAC, swinv.hw — производитель, модель, machine-id; формат JSON одинаков с Windows-шаблоном.
+        Триггер: манифест пакетов не обновляется дольше {$SWINV.NODATA}.
+        
+        Макросы:
+        - {$SWINV.APPS} — regex пакетов для LLD версий;
+        - {$SWINV.IP.NOT_MATCHES} — IPv4, исключаемые из swinv.net.ip4 (по умолчанию loopback и шлюзы мостов Docker);
+        - {$SWINV.IF.NOT_MATCHES} — интерфейсы, исключаемые из swinv.net.mac;
+        - {$SWINV.NODATA} — окно триггера, 30h;
+        - {$SWINV.SRC.NODATA} — предельный возраст источников swinv.net.ifaces и swinv.hw, 14h.
+        
+        Требования: Zabbix 7.0, Zabbix agent/agent2 7.0+ в активном режиме, режим инвентаря хоста Automatic.
+        
+        Author:  Konstantin Tyutyunnik / Константин Тютюнник
+        Site:    https://itforprof.com
+        Repo:    https://github.com/IT-for-Prof/zabbix-host-inventory
+        License: MIT (c) 2025-2026 Konstantin Tyutyunnik
+      vendor:
+        name: itforprof.com
+        version: 1.3.1
+      groups:
+        - name: 'Templates/Operating systems'
+      items:
+        - uuid: 9b4d33587a78409885c9b9238505bf12
+          name: 'Hardware: identity (JSON)'
+          type: CALCULATED
+          key: swinv.hw
+          delay: 12h
+          history: 14d
+          value_type: TEXT
+          trends: '0'
+          params: 'concat(count(//vfs.file.contents[/sys/class/dmi/id/sys_vendor],{$SWINV.SRC.NODATA}),",",count(//vfs.file.contents[/sys/class/dmi/id/product_name],{$SWINV.SRC.NODATA}),",",count(//vfs.file.contents[/etc/machine-id],{$SWINV.SRC.NODATA}),"<swinv>",last(//vfs.file.contents[/sys/class/dmi/id/sys_vendor]),"<swinv>",last(//vfs.file.contents[/sys/class/dmi/id/product_name]),"<swinv>",last(//vfs.file.contents[/etc/machine-id]))'
+          description: 'JSON {schema: 1, vendor, model, serial, machine_id}; пустая строка — значение недоступно или это заглушка SMBIOS («Default string», «To be filled by O.E.M.»). Если источник не ответил, элемент уходит в not supported. Linux: vendor и model из /sys/class/dmi/id, serial пуст (без root недоступен), machine_id из /etc/machine-id.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var p = value.split('<swinv>'), counts = p.shift().split(',');
+                  if (p.length !== counts.length || p.length !== 3) { throw 'formula returned ' + p.length + ' parts, expected 3'; }
+                  if (counts.some(function (c) { return !(+c > 0); })) { throw 'source item has no values for {$SWINV.SRC.NODATA}: ' + counts.join(',') + ' (sys_vendor, product_name, machine-id)'; }
+                  // SMBIOS placeholders left by board vendors carry no identity
+                  function v(s) { s = s.trim(); return /^(N\/A|Default string|To be filled by O\.E\.M\.|System (Serial Number|manufacturer|Product Name)|Not (Specified|Applicable)|None|0+)$/i.test(s) ? '' : s; }
+                  return JSON.stringify({ schema: 1, vendor: v(p[0]), model: v(p[1]), serial: '', machine_id: v(p[2]) });
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+            - tag: component
+              value: inventory
+        - uuid: 367e874b14ef486faaa563adb04acbb0
+          name: 'Network: interfaces (JSON)'
+          type: CALCULATED
+          key: swinv.net.ifaces
+          delay: 1h
+          history: 14d
+          value_type: TEXT
+          trends: '0'
+          params: 'concat(count(//system.hostname[host],{$SWINV.SRC.NODATA}),",",count(//vfs.file.contents[/proc/net/dev],{$SWINV.SRC.NODATA}),",",count(//vfs.dir.get[/sys/devices/virtual/net,^(uevent|bridge|tun_flags)$,,,,1,,,,,^(veth|cali)],{$SWINV.SRC.NODATA}),",",count(//vfs.file.contents[/proc/net/fib_trie],{$SWINV.SRC.NODATA}),",",count(//vfs.file.contents[/proc/net/route],{$SWINV.SRC.NODATA}),",",count(//system.hw.macaddr,{$SWINV.SRC.NODATA}),"<swinv>",last(//system.hostname[host]),"<swinv>",last(//vfs.file.contents[/proc/net/dev]),"<swinv>",last(//vfs.dir.get[/sys/devices/virtual/net,^(uevent|bridge|tun_flags)$,,,,1,,,,,^(veth|cali)]),"<swinv>",last(//vfs.file.contents[/proc/net/fib_trie]),"<swinv>",last(//vfs.file.contents[/proc/net/route]),"<swinv>",last(//system.hw.macaddr))'
+          description: 'JSON {schema: 1, hostname, interfaces: [{name, mac, up, kind, addresses}], unassigned} для сверки с IPAM. addresses — IPv4 с длиной префикса; [] — у интерфейса нет адресов. mac: "" — у интерфейса нет MAC (туннель), null — неизвестно. up: true/false, null — неизвестно. kind: physical, bridge, tunnel, container, virtual; lo не выводится. unassigned — адреса, интерфейс которых не определён. Если источник не ответил или ответ не разобран, элемент уходит в not supported. На Linux up всегда null; mac — null у интерфейсов без IPv4 (system.hw.macaddr видит только их). Интерфейс адреса — по самому длинному подключённому маршруту из /proc/net/route; /32 без маршрута и сеть на двух интерфейсах попадают в unassigned. kind: bridge и tunnel — по маркерам sysfs, имени (wg*, tun*, zt*) и нулевому MAC виртуального интерфейса, container — docker*, br-*, veth*.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var p = value.split('<swinv>'), counts = p.shift().split(',');
+                  if (p.length !== counts.length || p.length !== 6) { throw 'formula returned ' + p.length + ' parts, expected 6'; }
+                  if (counts.some(function (c) { return !(+c > 0); })) { throw 'source item has no values for {$SWINV.SRC.NODATA}: ' + counts.join(',') + ' (hostname, dev, sysfs, fib_trie, route, macaddr)'; }
+                  function n2ip(n) { return [n >>> 24, n >>> 16 & 255, n >>> 8 & 255, n & 255].join('.'); }
+                  function ip2n(s) { var o = s.split('.'); return (o[0] << 24 | o[1] << 16 | o[2] << 8 | o[3]) >>> 0; }
+                  // ponytail: /proc/net/route is host byte order, little-endian assumed (x86, arm64); big-endian hosts need no swap
+                  function hex(h) { var n = parseInt(h, 16); return (n << 24 | (n & 0xff00) << 8 | n >>> 8 & 0xff00 | n >>> 24) >>> 0; }
+                  function bits(m) { var c = 0; for (; m; m = m << 1 >>> 0) { c++; } return c; }
+                  var host = p[0].trim();
+                  if (!host) { throw 'empty system.hostname[host]'; }
+                  var ifs = {};
+                  p[1].split('\n').forEach(function (n) {
+                    if (n && n !== 'lo') { ifs[n] = { name: n, mac: null, up: null, kind: '', addresses: [] }; }
+                  });
+                  if (!Object.keys(ifs).length) { throw 'no interfaces besides lo in /proc/net/dev'; }
+                  var marks = {};
+                  p[2].split('\n').forEach(function (l) { var w = l.split(' '); marks[w[0]] = w.slice(1); });
+                  var ip = null, local = {};
+                  p[3].split('\n').forEach(function (l) {
+                    var m = l.match(/^[\s|+`-]*-- (\d+\.\d+\.\d+\.\d+)\s*$/);
+                    if (m) { ip = m[1]; return; }
+                    if (ip && /\/32 host LOCAL/.test(l) && !/^127\./.test(ip)) { local[ip] = 1; }
+                  });
+                  if (!Object.keys(local).length) { throw 'no local IPv4 address in fib_trie'; }
+                  var rl = p[4].split('\n'), routes = [];
+                  if (!/^Iface\s+Destination\s+Gateway\s+Flags/.test(rl[0])) { throw 'unexpected /proc/net/route header: ' + rl[0]; }
+                  rl.slice(1).forEach(function (l) {
+                    var f = l.trim().split(/\s+/);
+                    if (f.length < 8) { return; }
+                    // connected routes only: no gateway, not RTF_GATEWAY/RTF_HOST/RTF_REJECT, not a default route
+                    if (f[2] !== '00000000' || parseInt(f[3], 16) & 0x206 || f[7] === '00000000') { return; }
+                    var mask = hex(f[7]);
+                    routes.push({ dev: f[0], net: hex(f[1]), mask: mask, len: bits(mask) });
+                  });
+                  var unassigned = [];
+                  Object.keys(local).forEach(function (a) {
+                    var n = ip2n(a), best = -1, devs = [];
+                    routes.forEach(function (r) {
+                      if ((n & r.mask) >>> 0 !== r.net || r.len < best) { return; }
+                      if (r.len > best) { best = r.len; devs = []; }
+                      if (devs.indexOf(r.dev) < 0) { devs.push(r.dev); }
+                    });
+                    if (devs.length === 1 && ifs[devs[0]]) { ifs[devs[0]].addresses.push(a + '/' + best); }
+                    else { unassigned.push(a + '/' + (best < 0 ? 32 : best)); }
+                  });
+                  p[5].split(', ').forEach(function (e) {
+                    var m = e.match(/^\[([^\]:]+)(:[^\]]*)?\] ([0-9a-fA-F:]{17})$/);
+                    if (!m) { throw 'unexpected system.hw.macaddr entry: ' + e; }
+                    if (ifs[m[1]]) { ifs[m[1]].mac = m[3] === '00:00:00:00:00:00' ? '' : m[3].toLowerCase(); }
+                  });
+                  function byIp(x, y) { return ip2n(x.split('/')[0]) - ip2n(y.split('/')[0]); }
+                  var list = Object.keys(ifs).sort().map(function (k) {
+                    var i = ifs[k], m = marks[k] || [];
+                    i.kind = /^(docker\d*|br-[0-9a-f]{12}|veth|cali|flannel|cni)/.test(k) ? 'container'
+                      : m.indexOf('bridge') >= 0 ? 'bridge'
+                      // a virtual L3 device (zero MAC) is a tunnel even without tun_flags, e.g. OpenVPN AS as0t*
+                      : m.indexOf('tun_flags') >= 0 || /^(wg|tun|tap|zt|ppp|ipsec|vti|gre|tailscale|nebula)/.test(k) || m.indexOf('uevent') >= 0 && i.mac === '' ? 'tunnel'
+                      : m.indexOf('uevent') >= 0 ? 'virtual' : 'physical';
+                    i.addresses.sort(byIp);
+                    return i;
+                  });
+                  return JSON.stringify({ schema: 1, hostname: host, interfaces: list, unassigned: unassigned.sort(byIp) });
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+            - tag: component
+              value: inventory
+        - uuid: baccbcac0560494f963ba8473f464f78
+          name: 'Network: IPv4 addresses (JSON)'
+          type: DEPENDENT
+          key: swinv.net.ip4
+          delay: '0'
+          history: 90d
+          value_type: TEXT
+          trends: '0'
+          description: 'JSON-список локальных IPv4 хоста без дублей (адрес есть и в таблице Main, и в Local), без адресов из {$SWINV.IP.NOT_MATCHES}. Имён интерфейсов в fib_trie нет, поэтому мосты Docker отсекаются по адресу; мост с нестандартной подсетью добавьте в макрос хоста. Пустой итог — ошибка итема, а не пустой список.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var skip = new RegExp('{$SWINV.IP.NOT_MATCHES}'), ip = null, seen = {}, out = [];
+                  value.split('\n').forEach(function (l) {
+                    var m = l.match(/^[\s|+`-]*-- (\d+\.\d+\.\d+\.\d+)\s*$/);
+                    if (m) { ip = m[1]; return; }
+                    if (ip && /\/32 host LOCAL/.test(l) && !seen[ip] && !skip.test(ip)) { seen[ip] = 1; out.push(ip); }
+                  });
+                  if (!out.length) { throw 'no local IPv4 address left in fib_trie after {$SWINV.IP.NOT_MATCHES}'; }
+                  out.sort(function (a, b) {
+                    var x = a.split('.'), y = b.split('.');
+                    for (var i = 0; i < 4; i++) { if (x[i] - y[i]) { return x[i] - y[i]; } }
+                    return 0;
+                  });
+                  return JSON.stringify(out);
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: 'vfs.file.contents[/proc/net/fib_trie]'
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: cf04f9cbc96b43428fe8d31ffe09915d
+          name: 'Network: IPv4 addresses'
+          type: DEPENDENT
+          key: swinv.net.list
+          delay: '0'
+          history: 14d
+          value_type: TEXT
+          trends: '0'
+          description: 'IPv4-адреса через запятую; заполняет inventory host_networks.'
+          inventory_link: HOST_NETWORKS
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - 'return JSON.parse(value).join('', '');'
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: swinv.net.ip4
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: f9e2d65e42974ef1958f24d2b50b06c5
+          name: 'Network: MAC addresses (JSON)'
+          type: DEPENDENT
+          key: swinv.net.mac
+          delay: '0'
+          history: 90d
+          value_type: TEXT
+          trends: '0'
+          description: 'JSON [{ifname, mac}] без нулевых MAC (WireGuard и т. п.) и без интерфейсов из {$SWINV.IF.NOT_MATCHES}.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var skip = new RegExp('{$SWINV.IF.NOT_MATCHES}'), out = [];
+                  value.split(', ').forEach(function (p) {
+                    var m = p.match(/^\[(.+)\] ([0-9a-fA-F:]{17})$/);
+                    if (!m) { throw 'unexpected system.hw.macaddr entry: ' + p; }
+                    if (m[2] !== '00:00:00:00:00:00' && !skip.test(m[1])) { out.push({ ifname: m[1], mac: m[2].toLowerCase() }); }
+                  });
+                  return JSON.stringify(out);
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: system.hw.macaddr
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: e9c1b826e50a45988b2235afc81ae564
+          name: 'Network: MAC addresses'
+          type: DEPENDENT
+          key: swinv.net.macs
+          delay: '0'
+          history: 14d
+          value_type: CHAR
+          trends: '0'
+          description: 'MAC-адреса через запятую; заполняет inventory macaddress_a (поле 64 символа — влезает три адреса; полный список с именами интерфейсов в swinv.net.mac).'
+          inventory_link: MACADDRESS_A
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - 'return JSON.parse(value).map(function (x) { return x.mac; }).join('', '');'
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: swinv.net.mac
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: d539805eae974e938368925bc2aa343c
+          name: 'Operating system architecture'
+          type: DEPENDENT
+          key: swpkg.arch
+          delay: '0'
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'Преобладающая архитектура пакетов в манифесте без all/noarch (amd64, arm64, x86_64); заполняет inventory hw_arch. Зависимый итем, а не system.sw.arch: этот ключ уже есть в стоковом «Linux by Zabbix agent active».'
+          inventory_link: HW_ARCH
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var p;
+                  try { p = JSON.parse(value); } catch (e) { throw 'manifest is not valid JSON: ' + e; }
+                  if (!Array.isArray(p) || !p.length) { throw 'manifest is empty or not a JSON array'; }
+                  if (typeof p[0].name === 'undefined' || typeof p[0].version === 'undefined') {
+                    throw 'manifest entries carry no name/version — agent output shape changed';
+                  }
+                  var c = {};
+                  p.forEach(function (x) {
+                    var a = x.arch;
+                    if (a && a != 'all' && a != 'noarch') { c[a] = (c[a] || 0) + 1; }
+                  });
+                  var best = '', n = -1;
+                  for (var k in c) { if (c[k] > n) { n = c[k]; best = k; } }
+                  if (!best) { throw 'no architecture-bearing package in manifest'; }
+                  return best;
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 7d
+          master_item:
+            key: 'system.sw.packages.get[.*]'
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 52494af62b694f4193559729b1e75fb5
+          name: 'Installed software (readable)'
+          type: DEPENDENT
+          key: swpkg.readable
+          delay: '0'
+          history: 14d
+          value_type: TEXT
+          trends: '0'
+          description: 'Список «name version (arch)» по пакетам dpkg и rpm, отсортирован по имени; заполняет inventory software_full. При нечитаемом манифесте итем уходит в unsupported, а не затирает инвентарь пустотой.'
+          inventory_link: SOFTWARE_FULL
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var p;
+                  try { p = JSON.parse(value); } catch (e) { throw 'manifest is not valid JSON: ' + e; }
+                  if (!Array.isArray(p) || !p.length) { throw 'manifest is empty or not a JSON array'; }
+                  if (typeof p[0].name === 'undefined' || typeof p[0].version === 'undefined') {
+                    throw 'manifest entries carry no name/version — agent output shape changed';
+                  }
+                  p.sort(function (a, b) { return a.name < b.name ? -1 : 1; });
+                  return p.map(function (x) { return x.name + ' ' + x.version + ' (' + x.arch + ')'; }).join('\n');
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: 'system.sw.packages.get[.*]'
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 2a537fc26eb844a4917b1c5f05acf304
+          name: 'Installed packages: summary'
+          type: DEPENDENT
+          key: swpkg.summary
+          delay: '0'
+          history: 14d
+          value_type: CHAR
+          trends: '0'
+          description: 'Число пакетов по менеджерам, «N packages (N dpkg)»; заполняет inventory software. Якорь триггера живости: у мастера history=0, а здесь значение появляется при каждом проходе манифеста.'
+          inventory_link: SOFTWARE
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var p;
+                  try { p = JSON.parse(value); } catch (e) { throw 'manifest is not valid JSON: ' + e; }
+                  if (!Array.isArray(p) || !p.length) { throw 'manifest is empty or not a JSON array'; }
+                  if (typeof p[0].name === 'undefined' || typeof p[0].version === 'undefined') {
+                    throw 'manifest entries carry no name/version — agent output shape changed';
+                  }
+                  var m = {};
+                  p.forEach(function (x) { var k = x.manager || 'unknown'; m[k] = (m[k] || 0) + 1; });
+                  var parts = Object.keys(m).sort().map(function (k) { return m[k] + ' ' + k; });
+                  return p.length + ' packages (' + parts.join(', ') + ')';
+          master_item:
+            key: 'system.sw.packages.get[.*]'
+          tags:
+            - tag: class
+              value: inventory
+          triggers:
+            - uuid: d0ae5916a66a4c3981cedc4c7ad24577
+              expression: 'nodata(/Linux inventory by Zabbix agent active/swpkg.summary,{$SWINV.NODATA})=1'
+              name: 'Инвентарь ПО: манифест пакетов не обновляется (нет данных {$SWINV.NODATA})'
+              priority: INFO
+              description: |
+                Список установленного ПО перестал приходить. Инвентарь Zabbix при этом продолжает показывать ПОСЛЕДНИЙ собранный список — Zabbix никогда не чистит поля инвентаря, поэтому без этого триггера мёртвый сбор выглядит как свежие данные.
+                Три причины по частоте: агент старше 7.0 (ключ system.sw.packages.get не поддерживается — итем в unsupported), хост/агент не отвечает вовсе, манифест пришёл в неожиданном виде (JS-шаг бросает ошибку).
+                Что делать: Latest data по хосту → состояние system.sw.packages.get[.*] и swpkg.summary; затем zabbix_get -s <host> -k agent.version.
+                Runbook: https://wiki.itforprof.com/link/571
+              tags:
+                - tag: class
+                  value: inventory
+        - uuid: 91fbe486bff44c499de2ac5fab97e3e5
+          name: 'Version: docker-ce'
+          type: DEPENDENT
+          key: 'swpkg.version[docker-ce]'
+          delay: '0'
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: |
+            Версия пакета docker-ce из манифеста мастер-итема. 'not installed' — пакета нет в манифесте (например, сервис работает в контейнере). Нет данных — сломана цепочка сбора, это ловит триггер шаблона.
+            JSONPath не отличает «пакета нет» от «манифест пришёл в неожиданном виде»: на сломанном манифесте здесь тоже 'not installed'. Пока горит триггер живости, значению не доверять.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$[?(@.name=="docker-ce")].version.first()'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: 'not installed'
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: 'system.sw.packages.get[.*]'
+          tags:
+            - tag: app
+              value: docker
+            - tag: component
+              value: software-version
+        - uuid: b8197717dde64f44bbdf3e679ed0470a
+          name: 'Version: nginx'
+          type: DEPENDENT
+          key: 'swpkg.version[nginx]'
+          delay: '0'
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: |
+            Версия пакета nginx из манифеста мастер-итема. 'not installed' — пакета нет в манифесте (например, сервис работает в контейнере). Нет данных — сломана цепочка сбора, это ловит триггер шаблона.
+            JSONPath не отличает «пакета нет» от «манифест пришёл в неожиданном виде»: на сломанном манифесте здесь тоже 'not installed'. Пока горит триггер живости, значению не доверять.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$[?(@.name=="nginx")].version.first()'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: 'not installed'
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: 'system.sw.packages.get[.*]'
+          tags:
+            - tag: app
+              value: nginx
+            - tag: component
+              value: software-version
+        - uuid: b6bd85666b00465faf5d7468acd6e39b
+          name: 'Version: openssh-server'
+          type: DEPENDENT
+          key: 'swpkg.version[openssh-server]'
+          delay: '0'
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: |
+            Версия пакета openssh-server из манифеста мастер-итема. 'not installed' — пакета нет в манифесте (например, сервис работает в контейнере). Нет данных — сломана цепочка сбора, это ловит триггер шаблона.
+            JSONPath не отличает «пакета нет» от «манифест пришёл в неожиданном виде»: на сломанном манифесте здесь тоже 'not installed'. Пока горит триггер живости, значению не доверять.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$[?(@.name=="openssh-server")].version.first()'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: 'not installed'
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: 'system.sw.packages.get[.*]'
+          tags:
+            - tag: app
+              value: openssh
+            - tag: component
+              value: software-version
+        - uuid: 8c0a7769b2e04eba8bbd2b3af1e4c135
+          name: 'Version: openssl'
+          type: DEPENDENT
+          key: 'swpkg.version[openssl]'
+          delay: '0'
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: |
+            Версия пакета openssl из манифеста мастер-итема. 'not installed' — пакета нет в манифесте (например, сервис работает в контейнере). Нет данных — сломана цепочка сбора, это ловит триггер шаблона.
+            JSONPath не отличает «пакета нет» от «манифест пришёл в неожиданном виде»: на сломанном манифесте здесь тоже 'not installed'. Пока горит триггер живости, значению не доверять.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$[?(@.name=="openssl")].version.first()'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: 'not installed'
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: 'system.sw.packages.get[.*]'
+          tags:
+            - tag: app
+              value: openssl
+            - tag: component
+              value: software-version
+        - uuid: 2e54f2866c564d699b415b45da02eea3
+          name: 'System host name (source)'
+          type: ZABBIX_ACTIVE
+          key: 'system.hostname[host]'
+          delay: 1h
+          history: 7d
+          value_type: CHAR
+          trends: '0'
+          description: 'Имя хоста (uname nodename); источник swinv.net.ifaces. Параметр [host] отличает ключ от стокового system.hostname.'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 7917061a77734cbd8893493bfe11ae42
+          name: 'Network: MAC addresses (raw)'
+          type: ZABBIX_ACTIVE
+          key: system.hw.macaddr
+          delay: 1h
+          history: 14d
+          value_type: TEXT
+          trends: '0'
+          description: 'Встроенный ключ system.hw.macaddr (Linux, agent и agent2): «[ifname] mac, …» по интерфейсам с IPv4-адресом (агент перечисляет их через SIOCGIFCONF). Тип TEXT: на хосте с Docker-мостами строка длиннее 255 символов CHAR. Источник swinv.net.mac и swinv.net.ifaces.'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: bfea1a238ef1453899f1913313027e97
+          name: 'Operating system (pretty name)'
+          type: ZABBIX_ACTIVE
+          key: 'system.sw.os[name]'
+          delay: 1h
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'PRETTY_NAME из /etc/os-release («Ubuntu 24.04.1 LTS», «Debian GNU/Linux 12»); заполняет inventory os_full. Поле os заполняет стоковый итем system.sw.os строкой ядра.'
+          inventory_link: OS_FULL
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: b0e472e810bf47a49c2a8833df43e8d6
+          name: 'Installed packages: raw JSON (master)'
+          type: ZABBIX_ACTIVE
+          key: 'system.sw.packages.get[.*]'
+          delay: 1h
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          description: 'Мастер: JSON всех пакетов (name, version, arch, manager) встроенным ключом system.sw.packages.get. Параметр [.*] отличает ключ от стокового system.sw.packages.get в «Linux by Zabbix agent active». history=0: ответ до ~150 КБ, хранятся производные; живость цепочки — по swpkg.summary.'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 10743eb915fd4ba0832c2eac049c6a21
+          name: 'Network: virtual interfaces (source)'
+          type: ZABBIX_ACTIVE
+          key: 'vfs.dir.get[/sys/devices/virtual/net,^(uevent|bridge|tun_flags)$,,,,1,,,,,^(veth|cali)]'
+          delay: 1h
+          history: 7d
+          value_type: TEXT
+          trends: '0'
+          description: 'Интерфейсы из /sys/devices/virtual/net с маркерами: uevent — виртуальный, bridge — мост, tun_flags — tun/tap. Строки «имя маркеры»; veth* и cali* не обходятся. Источник swinv.net.ifaces.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var d, marks = {};
+                  try { d = JSON.parse(value); } catch (e) { throw 'vfs.dir.get did not return JSON: ' + e; }
+                  if (!Array.isArray(d)) { throw 'vfs.dir.get did not return a JSON array'; }
+                  d.forEach(function (e) {
+                    var m = String(e.pathname).match(/^\/sys\/devices\/virtual\/net\/([^\/]+)\/(uevent|bridge|tun_flags)$/);
+                    if (m) { (marks[m[1]] = marks[m[1]] || []).push(m[2]); }
+                  });
+                  if (!marks.lo) { throw 'lo is missing from /sys/devices/virtual/net: unexpected vfs.dir.get output'; }
+                  return Object.keys(marks).sort().map(function (k) { return k + ' ' + marks[k].sort().join(' '); }).join('\n');
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 80bc603202fc429bb100db86093eb3c9
+          name: 'Hardware: machine-id (source)'
+          type: ZABBIX_ACTIVE
+          key: 'vfs.file.contents[/etc/machine-id]'
+          delay: 12h
+          history: 7d
+          value_type: CHAR
+          trends: '0'
+          description: 'Идентификатор установки ОС из /etc/machine-id; совпадает у VM, склонированных без его перегенерации. Нет файла — N/A. Источник swinv.hw.'
+          preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '-1'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: N/A
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 5825936d31f240e39faf2419247c384f
+          name: 'Network: interface names (source)'
+          type: ZABBIX_ACTIVE
+          key: 'vfs.file.contents[/proc/net/dev]'
+          delay: 1h
+          history: 7d
+          value_type: TEXT
+          trends: '0'
+          description: 'Имена всех интерфейсов из /proc/net/dev, по строке; источник swinv.net.ifaces.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var out = [];
+                  value.split('\n').slice(2).forEach(function (l) {
+                    var m = l.match(/^\s*([^:\s]+):/);
+                    if (m) { out.push(m[1]); }
+                  });
+                  if (!out.length) { throw 'no interfaces in /proc/net/dev'; }
+                  return out.sort().join('\n');
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 7aed5e5e015645c68370e835a67b7037
+          name: 'Network: IPv4 routing trie (master)'
+          type: ZABBIX_ACTIVE
+          key: 'vfs.file.contents[/proc/net/fib_trie]'
+          delay: 1h
+          history: 7d
+          value_type: TEXT
+          trends: '0'
+          description: 'Мастер: /proc/net/fib_trie встроенным ключом vfs.file.contents. Локальные адреса хоста — строки «/32 host LOCAL». История нужна: swinv.net.ifaces читает значение через last().'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: aceaab7e51d54e0cb7df30a948837120
+          name: 'Network: IPv4 routes (source)'
+          type: ZABBIX_ACTIVE
+          key: 'vfs.file.contents[/proc/net/route]'
+          delay: 1h
+          history: 7d
+          value_type: TEXT
+          trends: '0'
+          description: 'Таблица main из /proc/net/route; источник swinv.net.ifaces: подключённые маршруты дают интерфейс и маску адреса.'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 57d99cedc0d9435185d499c695a70c31
+          name: 'Hardware: product name (source)'
+          type: ZABBIX_ACTIVE
+          key: 'vfs.file.contents[/sys/class/dmi/id/product_name]'
+          delay: 12h
+          history: 7d
+          value_type: CHAR
+          trends: '0'
+          description: 'Модель из DMI; читается без root. Нет файла — N/A. Источник swinv.hw.'
+          preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '-1'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: N/A
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: ad415e01eb794a15a61e484d50ce8b03
+          name: 'Hardware: system vendor (source)'
+          type: ZABBIX_ACTIVE
+          key: 'vfs.file.contents[/sys/class/dmi/id/sys_vendor]'
+          delay: 12h
+          history: 7d
+          value_type: CHAR
+          trends: '0'
+          description: 'Производитель из DMI; читается без root. Нет файла (ARM, часть VM) — N/A. Источник swinv.hw.'
+          preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '-1'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: N/A
+          tags:
+            - tag: class
+              value: inventory
+      discovery_rules:
+        - uuid: f20a76e4e17249b2a975029b2a1f5f15
+          name: 'Tracked software discovery'
+          type: DEPENDENT
+          key: swpkg.lld
+          delay: '0'
+          filter:
+            conditions:
+              - macro: '{#PKG.NAME}'
+                value: '{$SWINV.APPS}'
+                formulaid: A
+          description: 'Пакеты из мастера system.sw.packages.get[.*], имя которых совпадает с {$SWINV.APPS}; на каждый — итем версии. Удалённый пакет уходит по истечении lifetime.'
+          item_prototypes:
+            - uuid: 14bf07f3da714ef5a0b70f7ebabd0538
+              name: 'Version: {#PKG.NAME}'
+              type: DEPENDENT
+              key: 'swpkg.ver[{#PKG.NAME}]'
+              delay: '0'
+              history: 90d
+              value_type: CHAR
+              trends: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.name=="{#PKG.NAME}")].version.first()'
+                  error_handler: CUSTOM_VALUE
+                  error_handler_params: 'not installed'
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 12h
+              master_item:
+                key: 'system.sw.packages.get[.*]'
+              tags:
+                - tag: app
+                  value: '{#PKG.NAME}'
+                - tag: component
+                  value: software-version
+                - tag: manager
+                  value: '{#PKG.MANAGER}'
+          master_item:
+            key: 'system.sw.packages.get[.*]'
+          lld_macro_paths:
+            - lld_macro: '{#PKG.ARCH}'
+              path: $.arch
+            - lld_macro: '{#PKG.MANAGER}'
+              path: $.manager
+            - lld_macro: '{#PKG.NAME}'
+              path: $.name
+            - lld_macro: '{#PKG.VERSION}'
+              path: $.version
+      tags:
+        - tag: class
+          value: inventory
+      macros:
+        - macro: '{$SWINV.APPS}'
+          value: '^(containerd\.io|mariadb-server|mysql-server|mysql-community-server|mssql-server|postgresql-1[0-9]|redis-server|php-fpm|php[0-9.]+-fpm|mongodb(-org)?-server|apache2|httpd|haproxy|postfix|unbound|fail2ban|fail2ban-server|nodejs|vector|openvpn|strongswan|wireguard-tools)$'
+          description: 'Regex имён пакетов для LLD «Tracked software discovery». nginx, openssl, openssh-server и docker-ce — статические итемы, в макрос их не добавлять: будут дубли.'
+        - macro: '{$SWINV.IF.NOT_MATCHES}'
+          value: '^(lo|docker[0-9]*|veth.*|br-.*|virbr.*|cali.*|flannel.*|cni.*)$'
+          description: 'Интерфейсы, чьи MAC не попадают в swinv.net.mac и inventory macaddress_a: loopback и виртуальные сети контейнеров.'
+        - macro: '{$SWINV.IP.NOT_MATCHES}'
+          value: '^(127[.]|172[.](1[7-9]|2[0-9]|3[01])[.]0[.]1$)'
+          description: 'IPv4-адреса, которые не попадают в swinv.net.ip4 и inventory host_networks: loopback и шлюзы мостов Docker из стандартных пулов (172.17–31.0.0/16, адрес .0.1). Эвристика: в fib_trie нет имён интерфейсов. Мост с нестандартной подсетью (например 172.22.1.1) останется — добавьте его сюда. Точку пишите как [.]: макрос подставляется в JS-строку, где \. теряет обратный слеш; реальный адрес вида 172.2x.0.1 на хосте — уберите диапазон из макроса на уровне хоста.'
+        - macro: '{$SWINV.NODATA}'
+          value: 30h
+          description: 'Окно триггера «манифест не обновляется». Мастер-итем опрашивается раз в час и отдаёт значение вниз при изменении или по heartbeat 12h, поэтому здоровый хост молчит не дольше ~13h. 30h — с запасом на недоступность агента; окно можно снизить до ~14h.'
+        - macro: '{$SWINV.SRC.NODATA}'
+          value: 14h
+          description: 'Если у источника swinv.net.ifaces или swinv.hw нет новых данных дольше этого окна, элемент уходит в not supported, а не отдаёт старое значение. Источники опрашиваются раз в час (оборудование — раз в 12 часов), неизменное значение повторяется раз в 12 часов.'

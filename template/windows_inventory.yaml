@@ -1,0 +1,527 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: 1d9c5416b33343fa94a09c66b4ed9e22
+      name: 'Templates/Operating systems'
+  templates:
+    - uuid: 75b82f785c464a3881eb61b0709ef0b4
+      template: 'Windows inventory by Zabbix agent active'
+      name: 'Windows inventory by Zabbix agent active'
+      description: |
+        Инвентарь Windows только встроенными ключами Zabbix agent 7.0+ (без UserParameter):
+        - установленное ПО из веток Uninstall через registry.get в режиме values: DisplayName и DisplayVersion, записи MSI в том числе. 64-бит → inventory software_full, 32-бит (WOW6432Node) → notes, число → software; нормализованный JSON — в swinv.apps[x64|x86];
+        - сетевые адаптеры через wmi.getall (Win32_NetworkAdapterConfiguration): сырой JSON, читаемый список → host_networks, MAC → macaddress_a;
+        - производитель, модель, серийник BIOS через WMI → vendor, model, serialno_a.
+        - для сверки с IPAM: swinv.net.ifaces — интерфейсы с адресами/префиксом и MAC, swinv.hw — производитель, модель, серийник; формат JSON одинаков с Linux-шаблоном.
+        Системные компоненты и обновления отфильтрованы. Триггер: список ПО не обновляется дольше {$SWINV.NODATA}.
+        
+        Макросы:
+        - {$SW.EXCLUDE.BUILTIN} — regex DisplayName встроенных компонентов Windows и KB;
+        - {$SW.EXCLUDE.MATCHES} — свой regex исключений, по умолчанию пусто (?!);
+        - {$SWINV.NODATA} — окно триггера, 30h;
+        - {$SWINV.SRC.NODATA} — предельный возраст источников swinv.net.ifaces и swinv.hw, 14h.
+        
+        Требования: Zabbix 7.0, Zabbix agent/agent2 7.0+ в активном режиме, режим инвентаря хоста Automatic.
+        
+        Author:  Konstantin Tyutyunnik / Константин Тютюнник
+        Site:    https://itforprof.com
+        Repo:    https://github.com/IT-for-Prof/zabbix-host-inventory
+        License: MIT (c) 2025-2026 Konstantin Tyutyunnik
+      vendor:
+        name: itforprof.com
+        version: 1.3.1
+      groups:
+        - name: 'Templates/Operating systems'
+      items:
+        - uuid: bbaaf942f3034cffb72c3011d6a0382b
+          name: 'Installed software (64-bit): registry (master)'
+          type: ZABBIX_ACTIVE
+          key: 'registry.get[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall,values,"^(DisplayName|DisplayVersion|Publisher|SystemComponent|ParentKeyName|ReleaseType)$"]'
+          delay: 1h
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          description: 'Мастер: значения DisplayName/DisplayVersion/Publisher/SystemComponent/ParentKeyName/ReleaseType из всех подключей ветки Uninstall (64-бит), включая записи MSI под GUID. Ответ большой (на терминальном сервере 250–350 КБ), поэтому history=0: история режет текст на 64 КБ, а предобработка зависимых итемов получает ответ целиком.'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 8fdc0d40938447a69785559d60cced2d
+          name: 'Installed software (32-bit): registry (master)'
+          type: ZABBIX_ACTIVE
+          key: 'registry.get[HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall,values,"^(DisplayName|DisplayVersion|Publisher|SystemComponent|ParentKeyName|ReleaseType)$"]'
+          delay: 1h
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          description: 'Мастер: значения DisplayName/DisplayVersion/Publisher/SystemComponent/ParentKeyName/ReleaseType из всех подключей ветки Uninstall (32-бит, WOW6432Node), включая записи MSI под GUID. Ответ большой (на терминальном сервере 250–350 КБ), поэтому history=0: история режет текст на 64 КБ, а предобработка зависимых итемов получает ответ целиком.'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: c4732c7901e84c1f97ac2dc725e71e0e
+          name: 'Installed software (64-bit): list'
+          type: DEPENDENT
+          key: 'swinv.apps.list[x64]'
+          delay: '0'
+          history: 14d
+          value_type: TEXT
+          trends: '0'
+          description: 'Читаемый список «Имя Версия», по строке на приложение; заполняет inventory software_full.'
+          inventory_link: SOFTWARE_FULL
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  return JSON.parse(value).map(function (x) {
+                    return x.version && x.name.indexOf(x.version) < 0 ? x.name + ' ' + x.version : x.name;
+                  }).join('\n');
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: 'swinv.apps[x64]'
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 8173168fcaf941f990e2ae2d18a7e668
+          name: 'Installed software (32-bit): list'
+          type: DEPENDENT
+          key: 'swinv.apps.list[x86]'
+          delay: '0'
+          history: 14d
+          value_type: TEXT
+          trends: '0'
+          description: 'Читаемый список «Имя Версия», по строке на приложение; заполняет inventory notes: у Zabbix всего три длинных текстовых поля инвентаря, software_full занято 64-битным списком.'
+          inventory_link: NOTES
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  return JSON.parse(value).map(function (x) {
+                    return x.version && x.name.indexOf(x.version) < 0 ? x.name + ' ' + x.version : x.name;
+                  }).join('\n');
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: 'swinv.apps[x86]'
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 0f647b41f9a8479481fc3b23d0a783c0
+          name: 'Installed software (64-bit): summary'
+          type: DEPENDENT
+          key: 'swinv.apps.summary[x64]'
+          delay: '0'
+          history: 14d
+          value_type: CHAR
+          trends: '0'
+          description: 'Число приложений в 64-битной ветке; заполняет inventory software. Якорь триггера живости: у мастера history=0.'
+          inventory_link: SOFTWARE
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - 'return JSON.parse(value).length + '' apps (64-bit)'';'
+          master_item:
+            key: 'swinv.apps[x64]'
+          tags:
+            - tag: class
+              value: inventory
+          triggers:
+            - uuid: c6755584e08a49b3962100452c8f9922
+              expression: 'nodata(/Windows inventory by Zabbix agent active/swinv.apps.summary[x64],{$SWINV.NODATA})=1'
+              name: 'Инвентарь ПО: список установленного ПО не обновляется (нет данных {$SWINV.NODATA})'
+              priority: INFO
+              description: |
+                Список установленного ПО перестал приходить, а поля инвентаря продолжают показывать последний собранный список — Zabbix их не чистит.
+                Самая частая причина: агент старше 7.0 не знает ключ registry.get (мастер-итем в unsupported с «Unsupported item key.»), реже — ответ реестра пришёл обрезанным или не JSON (JS-шаг бросает ошибку).
+                Что делать: Latest data по хосту → состояние registry.get[…Uninstall,values,…] и swinv.apps[x64]; затем zabbix_get -s <host> -k agent.version; лечится обновлением агента.
+                Runbook: https://wiki.itforprof.com/link/571
+              tags:
+                - tag: class
+                  value: inventory
+        - uuid: 2807c286ddad48a58f1e4ebe63e415c0
+          name: 'Installed software (64-bit): JSON'
+          type: DEPENDENT
+          key: 'swinv.apps[x64]'
+          delay: '0'
+          history: 14d
+          value_type: TEXT
+          trends: '0'
+          description: 'Нормализованный список приложений (64-бит) для потребителей API: [{name, version, publisher}], без системных компонентов (SystemComponent=1), обновлений (ParentKeyName, ReleaseType) и имён из {$SW.EXCLUDE.BUILTIN} / {$SW.EXCLUDE.MATCHES}. Невалидный regex в макросе или обрезанный ответ реестра — ошибка итема, а не молча пустой список.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var raw;
+                  if (value.slice(-1) !== ']') { throw 'registry.get payload is truncated or not a JSON array'; }
+                  try { raw = JSON.parse(value); } catch (e) { throw 'registry.get did not return JSON: ' + e; }
+                  var apps = {};
+                  raw.forEach(function (e) {
+                    (apps[e.fullkey] = apps[e.fullkey] || {})[e.name] = e.data;
+                  });
+                  var b = new RegExp('{$SW.EXCLUDE.BUILTIN}'), m = new RegExp('{$SW.EXCLUDE.MATCHES}');
+                  var seen = {}, list = [];
+                  Object.keys(apps).forEach(function (k) {
+                    var a = apps[k], n = a.DisplayName ? String(a.DisplayName).trim() : '';
+                    if (!n || a.SystemComponent == 1 || a.ParentKeyName || /Update|Hotfix/.test(a.ReleaseType || '')) { return; }
+                    if (b.test(n) || m.test(n)) { return; }
+                    var v = a.DisplayVersion ? String(a.DisplayVersion).trim() : '';
+                    if (seen[n + '|' + v]) { return; }
+                    seen[n + '|' + v] = 1;
+                    list.push({ name: n, version: v, publisher: a.Publisher ? String(a.Publisher).trim() : '' });
+                  });
+                  list.sort(function (x, y) {
+                    var p = x.name.toLowerCase(), q = y.name.toLowerCase();
+                    return p < q ? -1 : p > q ? 1 : 0;
+                  });
+                  return JSON.stringify(list);
+          master_item:
+            key: 'registry.get[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall,values,"^(DisplayName|DisplayVersion|Publisher|SystemComponent|ParentKeyName|ReleaseType)$"]'
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 706d44ac84ee4976bebb3b1089136ac7
+          name: 'Installed software (32-bit): JSON'
+          type: DEPENDENT
+          key: 'swinv.apps[x86]'
+          delay: '0'
+          history: 14d
+          value_type: TEXT
+          trends: '0'
+          description: 'Нормализованный список приложений (32-бит) для потребителей API: [{name, version, publisher}], без системных компонентов (SystemComponent=1), обновлений (ParentKeyName, ReleaseType) и имён из {$SW.EXCLUDE.BUILTIN} / {$SW.EXCLUDE.MATCHES}. Невалидный regex в макросе или обрезанный ответ реестра — ошибка итема, а не молча пустой список.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var raw;
+                  if (value.slice(-1) !== ']') { throw 'registry.get payload is truncated or not a JSON array'; }
+                  try { raw = JSON.parse(value); } catch (e) { throw 'registry.get did not return JSON: ' + e; }
+                  var apps = {};
+                  raw.forEach(function (e) {
+                    (apps[e.fullkey] = apps[e.fullkey] || {})[e.name] = e.data;
+                  });
+                  var b = new RegExp('{$SW.EXCLUDE.BUILTIN}'), m = new RegExp('{$SW.EXCLUDE.MATCHES}');
+                  var seen = {}, list = [];
+                  Object.keys(apps).forEach(function (k) {
+                    var a = apps[k], n = a.DisplayName ? String(a.DisplayName).trim() : '';
+                    if (!n || a.SystemComponent == 1 || a.ParentKeyName || /Update|Hotfix/.test(a.ReleaseType || '')) { return; }
+                    if (b.test(n) || m.test(n)) { return; }
+                    var v = a.DisplayVersion ? String(a.DisplayVersion).trim() : '';
+                    if (seen[n + '|' + v]) { return; }
+                    seen[n + '|' + v] = 1;
+                    list.push({ name: n, version: v, publisher: a.Publisher ? String(a.Publisher).trim() : '' });
+                  });
+                  list.sort(function (x, y) {
+                    var p = x.name.toLowerCase(), q = y.name.toLowerCase();
+                    return p < q ? -1 : p > q ? 1 : 0;
+                  });
+                  return JSON.stringify(list);
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: 'registry.get[HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall,values,"^(DisplayName|DisplayVersion|Publisher|SystemComponent|ParentKeyName|ReleaseType)$"]'
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 843a751ecc4b49a7afc813f5a2c24fc8
+          name: 'Hardware: identity (JSON)'
+          type: CALCULATED
+          key: swinv.hw
+          delay: 12h
+          history: 14d
+          value_type: TEXT
+          trends: '0'
+          params: 'concat(count(//wmi.get[root\cimv2,"select Manufacturer from Win32_ComputerSystem"],{$SWINV.SRC.NODATA}),",",count(//wmi.get[root\cimv2,"select Model from Win32_ComputerSystem"],{$SWINV.SRC.NODATA}),",",count(//wmi.get[root\cimv2,"select SerialNumber from Win32_BIOS"],{$SWINV.SRC.NODATA}),"<swinv>",last(//wmi.get[root\cimv2,"select Manufacturer from Win32_ComputerSystem"]),"<swinv>",last(//wmi.get[root\cimv2,"select Model from Win32_ComputerSystem"]),"<swinv>",last(//wmi.get[root\cimv2,"select SerialNumber from Win32_BIOS"]))'
+          description: 'JSON {schema: 1, vendor, model, serial, machine_id}; пустая строка — значение недоступно или это заглушка SMBIOS («Default string», «To be filled by O.E.M.»). Если источник не ответил, элемент уходит в not supported. Windows: vendor, model, serial из WMI-итемов шаблона; machine_id пуст.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var p = value.split('<swinv>'), counts = p.shift().split(',');
+                  if (p.length !== counts.length || p.length !== 3) { throw 'formula returned ' + p.length + ' parts, expected 3'; }
+                  if (counts.some(function (c) { return !(+c > 0); })) { throw 'source item has no values for {$SWINV.SRC.NODATA}: ' + counts.join(',') + ' (Manufacturer, Model, BIOS serial)'; }
+                  // SMBIOS placeholders left by board vendors carry no identity
+                  function v(s) { s = s.trim(); return /^(N\/A|Default string|To be filled by O\.E\.M\.|System (Serial Number|manufacturer|Product Name)|Not (Specified|Applicable)|None|0+)$/i.test(s) ? '' : s; }
+                  return JSON.stringify({ schema: 1, vendor: v(p[0]), model: v(p[1]), serial: v(p[2]), machine_id: '' });
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+            - tag: component
+              value: inventory
+        - uuid: c7ed6ac3cf5a42b0b4b5e788a9a7fa7a
+          name: 'Network: interfaces (JSON)'
+          type: CALCULATED
+          key: swinv.net.ifaces
+          delay: 1h
+          history: 14d
+          value_type: TEXT
+          trends: '0'
+          params: 'concat(count(//system.hostname[host],{$SWINV.SRC.NODATA}),",",count(//wmi.getall[root\cimv2,"select InterfaceIndex,NetConnectionID,Description,MACAddress,NetConnectionStatus,NetEnabled,PhysicalAdapter from Win32_NetworkAdapter where NetConnectionID IS NOT NULL"],{$SWINV.SRC.NODATA}),",",count(//wmi.getall[root\StandardCimv2,"select InterfaceIndex,IPAddress,PrefixLength from MSFT_NetIPAddress where AddressFamily=2"],{$SWINV.SRC.NODATA}),"<swinv>",last(//system.hostname[host]),"<swinv>",last(//wmi.getall[root\cimv2,"select InterfaceIndex,NetConnectionID,Description,MACAddress,NetConnectionStatus,NetEnabled,PhysicalAdapter from Win32_NetworkAdapter where NetConnectionID IS NOT NULL"]),"<swinv>",last(//wmi.getall[root\StandardCimv2,"select InterfaceIndex,IPAddress,PrefixLength from MSFT_NetIPAddress where AddressFamily=2"]))'
+          description: 'JSON {schema: 1, hostname, interfaces: [{name, mac, up, kind, addresses}], unassigned} для сверки с IPAM. addresses — IPv4 с длиной префикса; [] — у интерфейса нет адресов. mac: "" — у интерфейса нет MAC (туннель), null — неизвестно. up: true/false, null — неизвестно. kind: physical, bridge, tunnel, container, virtual; lo не выводится. unassigned — адреса, интерфейс которых не определён. Если источник не ответил или ответ не разобран, элемент уходит в not supported. Windows: адаптеры с NetConnectionID из Win32_NetworkAdapter, name — имя подключения («Ethernet0»); адреса с префиксом из MSFT_NetIPAddress, склейка по InterfaceIndex. up: NetConnectionStatus 2 — true; 0, 7 или отключён — false. kind: tunnel — TAP/WireGuard/Wintun/WireSock и т. п. по описанию, bridge — Hyper-V Virtual Ethernet, physical — PhysicalAdapter.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var p = value.split('<swinv>'), counts = p.shift().split(',');
+                  if (p.length !== counts.length || p.length !== 3) { throw 'formula returned ' + p.length + ' parts, expected 3'; }
+                  if (counts.some(function (c) { return !(+c > 0); })) { throw 'source item has no values for {$SWINV.SRC.NODATA}: ' + counts.join(',') + ' (hostname, Win32_NetworkAdapter, MSFT_NetIPAddress)'; }
+                  function arr(s, what) {
+                    var a;
+                    try { a = JSON.parse(s); } catch (e) { throw what + ' did not return JSON: ' + e; }
+                    if (!Array.isArray(a)) { throw what + ' did not return a JSON array'; }
+                    return a;
+                  }
+                  function ip2n(s) { var o = s.split('.'); return (o[0] << 24 | o[1] << 16 | o[2] << 8 | o[3]) >>> 0; }
+                  function byIp(x, y) { return ip2n(x.split('/')[0]) - ip2n(y.split('/')[0]); }
+                  // wmi.getall returns WMI booleans as the strings "True"/"False"
+                  function yes(x) { return String(x).toLowerCase() === 'true'; }
+                  var host = p[0].trim();
+                  if (!host) { throw 'empty system.hostname[host]'; }
+                  var ifs = {};
+                  arr(p[1], 'Win32_NetworkAdapter').forEach(function (a) {
+                    if (a.InterfaceIndex === undefined || !a.NetConnectionID) { throw 'Win32_NetworkAdapter entry without InterfaceIndex/NetConnectionID'; }
+                    var mac = (a.MACAddress || '').toLowerCase(), d = a.Description || '';
+                    if (mac && !/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac)) { throw 'unexpected MACAddress: ' + a.MACAddress; }
+                    ifs[a.InterfaceIndex] = {
+                      name: a.NetConnectionID,
+                      mac: mac === '00:00:00:00:00:00' ? '' : mac,
+                      up: String(a.NetEnabled).toLowerCase() === 'false' || a.NetConnectionStatus === 0 || a.NetConnectionStatus === 7 ? false
+                        : a.NetConnectionStatus === 2 ? true : null,
+                      kind: /TAP-Windows|WireGuard|Wintun|WireSock|OpenVPN|ZeroTier|Tailscale|Fortinet|AnyConnect|PANGP/i.test(d) ? 'tunnel'
+                        : /Hyper-V Virtual Ethernet/i.test(d) ? 'bridge'
+                        : yes(a.PhysicalAdapter) ? 'physical' : 'virtual',
+                      addresses: []
+                    };
+                  });
+                  var ips = arr(p[2], 'MSFT_NetIPAddress'), unassigned = [];
+                  if (!ips.length) { throw 'MSFT_NetIPAddress returned no IPv4 address'; }
+                  ips.forEach(function (a) {
+                    if (a.InterfaceIndex === undefined || !a.IPAddress || a.PrefixLength === undefined) {
+                      throw 'MSFT_NetIPAddress entry without InterfaceIndex/IPAddress/PrefixLength';
+                    }
+                    if (/^127\./.test(a.IPAddress)) { return; }
+                    var s = a.IPAddress + '/' + a.PrefixLength;
+                    if (ifs[a.InterfaceIndex]) { ifs[a.InterfaceIndex].addresses.push(s); } else { unassigned.push(s); }
+                  });
+                  var list = Object.keys(ifs).map(function (k) { ifs[k].addresses.sort(byIp); return ifs[k]; });
+                  list.sort(function (x, y) { return x.name < y.name ? -1 : x.name > y.name ? 1 : 0; });
+                  return JSON.stringify({ schema: 1, hostname: host, interfaces: list, unassigned: unassigned.sort(byIp) });
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+            - tag: component
+              value: inventory
+        - uuid: 6f7bf97aa21d428ba7882ccdc25e9797
+          name: 'Network adapters: list'
+          type: DEPENDENT
+          key: swinv.net.list
+          delay: '0'
+          history: 14d
+          value_type: TEXT
+          trends: '0'
+          description: 'Читаемо: «адаптер MAC: IP/префикс, …» по строке на адаптер, без link-local (fe80::, 169.254.*); заполняет inventory host_networks.'
+          inventory_link: HOST_NETWORKS
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var a;
+                  try { a = JSON.parse(value); } catch (e) { throw 'wmi.getall did not return JSON: ' + e; }
+                  if (!Array.isArray(a)) { throw 'wmi.getall did not return a JSON array'; }
+                  function bits(m) {
+                    if (/^\d+$/.test(m)) { return m; }
+                    return String(m.split('.').reduce(function (n, o) {
+                      for (var b = +o; b; b = (b << 1) & 255) { n++; }
+                      return n;
+                    }, 0));
+                  }
+                  return a.map(function (n) {
+                    var ips = n.IPAddress || [], masks = n.IPSubnet || [];
+                    var ip = ips.map(function (x, i) { return masks[i] ? x + '/' + bits(masks[i]) : x; })
+                      .filter(function (x) { return !/^(fe80:|169\.254\.)/i.test(x); });
+                    return n.Description + ' ' + (n.MACAddress || '').toLowerCase() + ': ' + ip.join(', ');
+                  }).join('\n');
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: 'wmi.getall[root\cimv2,"select Description,MACAddress,IPAddress,IPSubnet from Win32_NetworkAdapterConfiguration where IPEnabled=True"]'
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: b6acac39a1844d3f8438ecde8718ba71
+          name: 'Network adapters: MAC addresses'
+          type: DEPENDENT
+          key: swinv.net.macs
+          delay: '0'
+          history: 14d
+          value_type: CHAR
+          trends: '0'
+          description: 'MAC-адреса адаптеров через запятую; заполняет inventory macaddress_a (поле 64 символа — влезает три адреса, остальное обрезается; полный список в swinv.net.list).'
+          inventory_link: MACADDRESS_A
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var a;
+                  try { a = JSON.parse(value); } catch (e) { throw 'wmi.getall did not return JSON: ' + e; }
+                  if (!Array.isArray(a)) { throw 'wmi.getall did not return a JSON array'; }
+                  return a.map(function (n) { return (n.MACAddress || '').toLowerCase(); })
+                    .filter(function (x) { return x; }).join(', ');
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          master_item:
+            key: 'wmi.getall[root\cimv2,"select Description,MACAddress,IPAddress,IPSubnet from Win32_NetworkAdapterConfiguration where IPEnabled=True"]'
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 06b75061c42f4d06bdb55d318b1975cf
+          name: 'System host name (source)'
+          type: ZABBIX_ACTIVE
+          key: 'system.hostname[host]'
+          delay: 1h
+          history: 7d
+          value_type: CHAR
+          trends: '0'
+          description: 'DNS-имя хоста в исходном регистре; источник swinv.net.ifaces. Параметр [host] отличает ключ от стокового system.hostname (NetBIOS).'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: fa7abbf8c17049fa9acba6b76dca0794
+          name: 'Network adapters: raw JSON (WMI)'
+          type: ZABBIX_ACTIVE
+          key: 'wmi.getall[root\cimv2,"select Description,MACAddress,IPAddress,IPSubnet from Win32_NetworkAdapterConfiguration where IPEnabled=True"]'
+          delay: 1h
+          history: 14d
+          value_type: TEXT
+          trends: '0'
+          description: 'Сырой ответ WMI по адаптерам с IPEnabled=True: Description, MACAddress, IPAddress[] и IPSubnet[] (массивы; для IPv6 маска — длина префикса). Хранится как текст для потребителей API; читаемые формы — в зависимых итемах.'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 4b4504e7eb7443c888d77b3a31bc0b1c
+          name: 'Network adapters: Win32_NetworkAdapter (source)'
+          type: ZABBIX_ACTIVE
+          key: 'wmi.getall[root\cimv2,"select InterfaceIndex,NetConnectionID,Description,MACAddress,NetConnectionStatus,NetEnabled,PhysicalAdapter from Win32_NetworkAdapter where NetConnectionID IS NOT NULL"]'
+          delay: 1h
+          history: 7d
+          value_type: TEXT
+          trends: '0'
+          description: 'Адаптеры с именем подключения: индекс, имя, описание, MAC, состояние. Источник swinv.net.ifaces.'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: e5b21d500b1a47e0a468519e4f348451
+          name: 'Network adapters: IPv4 addresses (source)'
+          type: ZABBIX_ACTIVE
+          key: 'wmi.getall[root\StandardCimv2,"select InterfaceIndex,IPAddress,PrefixLength from MSFT_NetIPAddress where AddressFamily=2"]'
+          delay: 1h
+          history: 7d
+          value_type: TEXT
+          trends: '0'
+          description: 'IPv4-адреса с длиной префикса и индексом интерфейса из MSFT_NetIPAddress. Источник swinv.net.ifaces.'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 6fa6834f9d06457b9e1bc9c75e87a8aa
+          name: 'Manufacturer (WMI)'
+          type: ZABBIX_ACTIVE
+          key: 'wmi.get[root\cimv2,"select Manufacturer from Win32_ComputerSystem"]'
+          delay: 1h
+          value_type: CHAR
+          trends: '0'
+          description: 'Производитель шасси по WMI; заполняет inventory vendor.'
+          inventory_link: VENDOR
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 35454c3ae53a42e59ba6baa51ca6fbc4
+          name: 'Model (WMI)'
+          type: ZABBIX_ACTIVE
+          key: 'wmi.get[root\cimv2,"select Model from Win32_ComputerSystem"]'
+          delay: 1h
+          value_type: CHAR
+          trends: '0'
+          description: 'Модель шасси по WMI; заполняет inventory model.'
+          inventory_link: MODEL
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+        - uuid: 32000a7379594a30a3a9e1b2288a6ac8
+          name: 'BIOS serial number (WMI)'
+          type: ZABBIX_ACTIVE
+          key: 'wmi.get[root\cimv2,"select SerialNumber from Win32_BIOS"]'
+          delay: 1h
+          value_type: CHAR
+          trends: '0'
+          description: 'Серийный номер BIOS по WMI; заполняет inventory serialno_a. У виртуальных машин WMI часто отдаёт пустой результат — он превращается в N/A, а не в unsupported.'
+          inventory_link: SERIALNO_A
+          preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '0'
+                - 'Empty WMI search result'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: N/A
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 12h
+          tags:
+            - tag: class
+              value: inventory
+      tags:
+        - tag: class
+          value: inventory
+      macros:
+        - macro: '{$SW.EXCLUDE.BUILTIN}'
+          value: '^(AddressBook|Connection Manager|DirectDrawEx|DXM_Runtime|Fontcore|IE40|IE4Data|IE5BAKEX|IEData|MobileOptionPack|MPlayer2|SchedulingAgent|WIC|SnippingTool|mspaint|mstsc|Microsoft Edge Update|Microsoft EdgeWebView|KB[0-9]+)$'
+          description: 'Встроенный regex исключений по DisplayName (компоненты Windows, KB-обновления). Системные компоненты (SystemComponent=1) и обновления (ParentKeyName) отсекаются и без него.'
+        - macro: '{$SW.EXCLUDE.MATCHES}'
+          value: '(?!)'
+          description: 'Ручной regex исключений по DisplayName, например ^(AppA|AppB)$. По умолчанию (?!) — ничего не исключает. Точку пишите как [.], а не \.: макрос подставляется в JS-строку, где обратный слеш теряется. Невалидный regex переводит swinv.apps[*] в unsupported с текстом ошибки.'
+        - macro: '{$SWINV.NODATA}'
+          value: 30h
+          description: 'Окно триггера «список ПО не обновляется». Мастер-итем опрашивается раз в час и отдаёт значение вниз при изменении или по heartbeat 12h, поэтому здоровый хост молчит не дольше ~13h. 30h — с запасом на недоступность агента; окно можно снизить до ~14h.'
+        - macro: '{$SWINV.SRC.NODATA}'
+          value: 14h
+          description: 'Если у источника swinv.net.ifaces или swinv.hw нет новых данных дольше этого окна, элемент уходит в not supported, а не отдаёт старое значение. Источники опрашиваются раз в час (оборудование — раз в 12 часов), неизменное значение повторяется раз в 12 часов.'
